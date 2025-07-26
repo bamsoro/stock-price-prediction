@@ -94,7 +94,7 @@ Projet réalisé sous la supervision de **Youssef Esstafa** dans le cadre d’un
 ## 📬 Contact
 
 📧 sorobamara7@gmail.com  
-💼 [LinkedIn](https://www.linkedin.com/in/bamarasoro/) *(à compléter si tu le souhaites)*
+💼 [LinkedIn](https://www.linkedin.com/in/bamarasoro/)
 
 ---
 
