@@ -1,0 +1,1265 @@
+---
+title: "Code serie Temp"
+author: "Group"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+rm(list=ls())
+```
+
+```{r}
+library(quantmod)  
+library(tseries)
+library(ggplot2)
+library(scales) # Pour la fonction date_format dans la visualisation avec ggplot2
+library(forecast)
+library(quantmod)  
+library(tseries)  
+library(rugarch)   
+library(PerformanceAnalytics) 
+library(forecast)
+library(depmixS4)
+library(ggplot2)
+library(dplyr)
+library(aTSA)
+library(tseries)
+library(TTR)
+library(tseries)  
+library(urca) 
+library(caret)
+library(forecast)
+library(rugarch)
+```
+
+# Prétraitement et Analyse descriptives
+
+## Importation de la base de donnée
+
+Dans un premier temps nous allons importer la base de données et faire le pré-traitement des données importés pour qu'elles correspondent aux format souhaités
+
+```{r cars}
+getSymbols("^GSPC", 
+           src = "yahoo", 
+           from = "2000-01-01", 
+           to = "2023-12-31")
+
+# Convertir en data.frame
+
+sp500 <- as.data.frame(GSPC)
+
+# Ajouter une colonne "Date" pour faciliter l'accès aux dates
+
+sp500$Date <- as.Date(rownames(sp500))
+```
+
+Conversion en Data Frame
+
+```{r pressure, echo=FALSE}
+
+sp500=as.data.frame(sp500)
+print(summary(sp500))
+```
+
+nous regardons si il y a des valeurs manquantes :
+
+```{r}
+na_counts <- sapply(sp500, function(x) sum(is.na(x)))
+print(na_counts)
+```
+
+## Analyse préliminaire et satistiques descriptive
+
+### Statistiques descriptive
+
+```{r}
+# Sélectionner uniquement la variable GSPC.Adjusted
+valeurs_adjusted <- sp500$GSPC.Adjusted
+
+# Vérifier que les données ne sont pas vides
+if(length(valeurs_adjusted) == 0) {
+  stop("La variable GSPC.Adjusted est vide ou n'existe pas dans sp500.")
+}
+
+# Créer un data frame avec cette variable (optionnel)
+df_adjusted <- data.frame(Valeur = valeurs_adjusted)
+
+# Tracer le boxplot pour GSPC.Adjusted en passant directement le vecteur
+boxplot(df_adjusted$Valeur,
+        main = "Boxplot de GSPC.Adjusted",
+        xlab = "",
+        ylab = "Valeurs",
+        col = "blue",
+        notch = FALSE)
+
+```
+
+Nous allons maintenant voir si il n'y a pas d'individus aberrrant ou non :
+
+```{r}
+
+quantitative_vars <- c("GSPC.Open", "GSPC.High", "GSPC.Low", "GSPC.Close","GSPC.Adjusted")
+
+for (variable in quantitative_vars) {
+  
+  # Calcul des quartiles et de l'IQR
+  Q1 <- quantile(sp500[[variable]], 0.25, na.rm = TRUE)
+  Q3 <- quantile(sp500[[variable]], 0.75, na.rm = TRUE)
+  IQR_value <- Q3 - Q1
+  
+  # Définir les limites pour détecter les valeurs aberrantes
+  lower_bound <- Q1 - 1.5 * IQR_value
+  upper_bound <- Q3 + 1.5 * IQR_value
+  
+  # Identifier les valeurs aberrantes
+  outliers <- sp500[[variable]] < lower_bound | sp500[[variable]] > upper_bound
+  num_outliers <- sum(outliers, na.rm = TRUE)  # Compter les valeurs aberrantes
+  
+  # Calculer la proportion des valeurs aberrantes
+  total_values <- sum(!is.na(sp500[[variable]]))  # Nombre total de valeurs non manquantes
+  proportion_outliers <- num_outliers / total_values * 100  # En pourcentage
+  
+  # Résultats
+  cat("\nVariable :", variable, "\n")
+  cat("Nombre de valeurs aberrantes :", num_outliers, "\n")
+  cat("Proportion des valeurs aberrantes :", round(proportion_outliers, 2), "%\n")
+}
+```
+
+écart types
+
+```{r}
+##------------Statistiques descriptives-----------------------------------------
+print(summary(sp500[quantitative_vars]))
+for (col in quantitative_vars) {
+  
+  ecart_type <- sd(sp500[[col]], na.rm = TRUE)
+  print(paste("Écart-type de", col, ":", ecart_type))
+}
+```
+
+```{r}
+##------Distribution des variables----------------------------------------------
+
+# Histogramme et densité des variables
+
+breaks_fd <- nclass.FD(sp500[[col]])  # Méthode Freedman-Diaconis calcule le nombre optimal d'intervalles
+
+breaks <- breaks_fd
+for (col in quantitative_vars){
+  
+  hist(sp500[[col]], 
+      breaks = breaks,  
+      col = "skyblue", 
+      main = paste("Histogramme et densité de", col),
+      xlab = col, 
+      freq = FALSE) 
+    
+    # Ajouter la courbe de densité
+  lines(density(sp500[[col]], na.rm = TRUE), 
+          col = "red", 
+          lwd = 2)  
+  }
+##------On ne remarque pas une loi usuelle--------------------------------------
+```
+
+### Analyse de la stationnarité
+
+On va tout d'abord plot la série du prix de cloture ajusté qui est l'indicateur que nous avons choisis d'utiliser
+
+```{r}
+# Graphique  : Prix de clôture ajusté
+ggplot(sp500, aes(x = Date, y = GSPC.Adjusted)) +
+  geom_line(color = "steelblue", size = 1) +
+  labs(
+    title = "Prix de Clôture Ajusté au Fil du Temps",
+    x = "Date",
+    y = "Prix Ajusté (Adj. Close)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  ) +
+  scale_x_date(labels = date_format("%Y"), date_breaks = "2 year")
+```
+
+Il est clair que la série est non stationnaire, on voit clairement une tendance ascendante. Pour vérifier cela de manière statisque nous allons réaliser un test de stationnarité
+
+```{r}
+# Conversion en série temporelle 
+sp500_ts <- ts(sp500$GSPC.Adjusted, 
+               start = c(2007, 1,04), 
+               frequency = 250)   # 
+adf.test(sp500_ts)
+```
+
+p-value = 0.83 \> 5%, donc la série est fortement non stationnaire.
+
+```{r}
+acf(sp500_ts, lag.max=15)
+decomp<-decompose(sp500_ts)
+tendance<-decomp$trend
+seasonal <- decomp$seasonal 
+residual <- decomp$random
+
+
+plot.ts(tendance)
+plot.ts(seasonal)
+plot.ts(residual)
+print(mean(tendance,na.rm=TRUE))
+print(mean(seasonal,na.rm=TRUE))
+print(mean(residual,na.rm=TRUE))
+plot.ts(sp500_ts - tendance)
+```
+
+Le graphique de sp500_ts - tendance : visualiser les données dé-trendées Ce graphique représente les données originales (sp500_ts) après avoir retiré la composante de tendance. Cela met en évidence les variations dues à la saisonnalité et aux résidus.
+
+Nous avons vu que la serie des prix ajusté n'est pas stationnaire cependant c'est l'une des condiitons nécéssaires pour faire appliquer bon nombre de modèles de série temporelles / Pour résoudre ces problèmes l'une des solutions classique est de passer aux log rendements:
+
+```{r}
+sp500$GSPC.Adjusted_log = c(NA, diff(log(sp500$GSPC.Adjusted)))
+
+acf(sp500$GSPC.Adjusted_log[-1])
+pacf(sp500$GSPC.Adjusted_log[-1])
+adf.test(sp500$GSPC.Adjusted_log[-1])
+```
+
+les logs rendements permettant effectivemnt de rendre la série staionnaire
+
+## Feature Engeneering
+
+```{r}
+##-----------------Création des nouveaux indicateurs----------------------------
+
+sp500$ecart_prix_low_high=(sp500$GSPC.High-sp500$GSPC.Low)/sp500$GSPC.Low
+sp500$ecrat_prix_fermeture_cloture=(sp500$GSPC.Close-sp500$GSPC.Open)/sp500$GSPC.Open
+
+##--Le RSI: 100-100/(1+RS) ou RS est le rapport des gains moyens et des pertes 
+#moyennes sur une periode de  jours
+
+sp500$rsi <- RSI(sp500$GSPC.Adjusted, n = 5)#les 5 jours ouvrés de la semaine
+#print(sp500$rsi )
+
+# Tracer le RSI
+
+plot(sp500$rsi, type = "l", col = "blue", lwd = 2,
+     main = "Relative Strength Index (RSI)",
+     xlab = "Jours", ylab = "RSI")
+abline(h = c(30, 70), col = "red", lty = 2)  #>70 surachat, <30, survente
+```
+
+```{r}
+# Calculer l'Average True Range sur 5 jours: mesure la volatilité basée sur les prix hauts, bas et de clôture
+
+atr_7 <- ATR(sp500[, c("GSPC.High", "GSPC.Low", "GSPC.Close")], n = 5)
+
+sp500$atr_7=atr_7$atr
+
+#Le Chande Momentum Oscillator mesure la force de la tendance du prix
+
+sp500$cmo_14 <- CMO(sp500$GSPC.Close, n = 5)
+
+# Visualiser le CMO
+plot(sp500$cmo_14, type = "l", col = "blue", main = "Chande Momentum Oscillator (CMO)")
+
+
+# Visualiser l'ATR
+plot(sp500$atr_7, type = "l", col = "blue", main = "Average True Range (ATR)")
+
+
+```
+
+```{r}
+###---------------Stationnarité des indicateurs crées---------------------------
+
+indicateurs=c("atr_7","cmo_14","rsi")
+
+
+for (col in indicateurs) {
+  
+  cat("\n=============================\n")
+  cat("Tests pour la variable :", col, "\n")
+  
+  serie <- na.omit(sp500[[col]])
+  
+  # Test ADF
+  adf_result <- adf.test(serie)#Ho: non stationnarité
+  cat("Test ADF:\n")
+  print(adf_result)
+  
+  # Test KPSS autour d'une tendance
+  kpss_result <- ur.kpss(serie, type = "tau")  # "tau" pour stationnarité autour d'une tendance
+  cat("Test KPSS autour d'une tendance:\n")
+  print(summary(kpss_result))#Ho: non stationnarité
+    
+  # Test PP;Ho: non stationnarité
+  pp_result <- pp.test(serie)
+  cat("Test Phillips-Perron:\n")
+  print(pp_result)
+}
+
+
+```
+
+Tous les indicateurs crées sont stationnaire
+
+**On importe des données exogènes dans macro matrix**
+
+```{r}
+library(quantmod)
+library(rugarch)
+library(xts)
+
+# Étape 1 : Importer les données financières
+getSymbols("^GSPC", src = "yahoo", from = "2000-01-01", to = "2023-12-31")
+sp500_exo <- na.omit(as.data.frame(GSPC))
+
+# Calculer les log-rendements ajustés
+sp500_exo$GSPC.Adjusted_log <- c(NA, diff(log(sp500_exo$GSPC.Adjusted)))
+log_returns <- na.omit(sp500_exo$GSPC.Adjusted_log)  # Supprimer les NA
+
+# Convertir les log-rendements en xts pour un meilleur alignement
+log_returns_xts <- xts(log_returns, order.by = as.Date(row.names(sp500_exo))[-1])  # Log-rendements à partir de la deuxième date
+
+# Étape 2 : Télécharger des données macroéconomiques (PIB, inflation, taux d'intérêt)
+getSymbols("GDP", src = "FRED")         # PIB
+getSymbols("CPIAUCSL", src = "FRED")   # Inflation
+getSymbols("GS10", src = "FRED")       # Taux d'intérêt à 10 ans
+
+# Convertir les séries macro en journalier via interpolation linéaire
+# Étendre les dates des données macroéconomiques à la fréquence journalière
+all_dates <- seq(from = min(index(log_returns_xts)), to = max(index(log_returns_xts)), by = "day")
+
+# Interpolation linéaire pour chaque série macroéconomique
+aligned_gdp <- na.approx(merge(xts(, all_dates), GDP, all = TRUE))  # PIB aligné
+aligned_inflation <- na.approx(merge(xts(, all_dates), CPIAUCSL, all = TRUE))  # Inflation alignée
+aligned_interest_rate <- na.approx(merge(xts(, all_dates), GS10, all = TRUE))  # Taux d'intérêt aligné
+
+# Étape 3 : Aligner les log-rendements avec les données macro
+# Extraire les dates communes
+common_dates <- index(log_returns_xts)
+aligned_macro <- cbind(aligned_gdp[common_dates], aligned_inflation[common_dates], aligned_interest_rate[common_dates])
+
+# Créer une matrice des régressions externes (et supprimer les NA éventuels)
+macro_matrix <- na.omit(aligned_macro)
+
+# Étape 4 : Normaliser les colonnes de la matrice macroéconomique
+normalize <- function(x) {
+  (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+}
+
+# Appliquer la normalisation à chaque colonne
+macro_matrix <- apply(macro_matrix, 2, normalize)
+
+# S'assurer que les dimensions correspondent
+log_returns_xts <- log_returns_xts[index(macro_matrix)]  # Filtrer log_returns sur les dates communes
+if (length(log_returns_xts) != nrow(macro_matrix)) {
+  stop("Les dimensions des données financières et macroéconomiques ne correspondent pas.")
+}
+
+
+macro_matrix<-as.matrix(macro_matrix)
+```
+
+## Spliting and Modélisation
+
+```{r}
+#----spliting en 80% train et 20% test------------------------------------------
+
+
+n <- nrow(sp500)                # Longueur totale de la série temporelle
+test_size <- round(0.2 * n)      # 20 % pour l'ensemble de test
+train_size <- n - test_size      # 80 % pour l'ensemble d'entraînement
+
+# Diviser les données
+train_data <- sp500[1:train_size,]          # Ensemble d'entraînement (80 %)
+test_data <- sp500[(train_size + 1):n,]     # Ensemble de test (20 %)
+
+# Vérifier les tailles des ensembles
+cat("Taille des données d'entraînement :", nrow(train_data), "\n")
+cat("Taille des données de test :", nrow(test_data), "\n")
+
+
+head(train_data)
+```
+
+On retire les Naan
+
+```{r}
+train_data <- na.omit(train_data)
+train_data_ts <- ts(train_data$GSPC.Adjusted_log,start = c(2007,01,04),frequency = 1)
+adf.test(train_data$GSPC.Adjusted_log)
+
+```
+
+# ARIMA
+
+On regarde l'ACF et la PACF
+
+```{r}
+acf(ts(train_data_ts), lag.max = 15)
+pacf(ts(train_data_ts), lag.max = 15)
+```
+
+## Selection manuel de modèle
+
+Un modèle ARMA est donc candidat puisque notre serie des log_rendement est stationnaire, plus besoins de la différencier. PACF : p_max optimal : 2 ACF : q_max optima : 2
+
+```{r}
+test_arima_models <- function(ts_data, max_p = 2, max_q = 2) {
+  # Créer une liste pour stocker les résultats
+  results <- list()
+
+  # Boucle sur les valeurs de p et q
+  for (p in 0:max_p) {
+    for (q in 0:max_q) {
+      # Tenter d'ajuster le modèle ARIMA(p, 0, q)
+      tryCatch({
+        model <- arima(ts_data, order = c(p, 0, q))
+
+        # Extraire AIC et BIC
+        aic <- AIC(model)
+        bic <- BIC(model)
+
+        # Ajouter les résultats à la liste
+        results <- append(results, list(data.frame(p = p, q = q, AIC = aic, BIC = bic)))
+      }, error = function(e) {
+        # En cas d'erreur, continuer la boucle sans arrêter
+        warning(paste("Erreur pour ARIMA(", p, ",0,", q, ") :", e$message))
+      })
+    }
+  }
+
+  # Combiner tous les résultats en un seul data frame
+  results_df <- do.call(rbind, results)
+
+  # Trier les résultats par AIC puis BIC
+  results_df <- results_df[order(results_df$AIC), ]
+
+  return(results_df)
+}
+
+#Application
+results_arima <- test_arima_models(train_data_ts, max_p = 2, max_q = 2)
+
+# Afficher les résultats
+print(results_arima)
+```
+
+```{r}
+# Trouver le modèle avec le plus petit AIC
+best_model_aic <- results_arima[which.min(results_arima$AIC), ]
+
+# Afficher le modèle avec le plus petit AIC
+cat("Le modèle ARIMA avec le plus petit AIC est ARIMA(", 
+    best_model_aic$p, ",0,", best_model_aic$q, ") avec un AIC de ", 
+    best_model_aic$AIC, "\n")
+
+```
+
+```{r}
+# Trouver le modèle avec le plus petit BIC
+best_model_bic <- results_arima[which.min(results_arima$BIC), ]
+
+# Afficher le modèle avec le plus petit BIC
+cat("Le modèle ARIMA avec le plus petit BIC est ARIMA(", 
+    best_model_bic$p, ",0,", best_model_bic$q, ") avec un BIC de ", 
+    best_model_bic$BIC, "\n")
+
+```
+
+Vérification de la validité du modèle
+
+```{r}
+arima200 <- arima(ts(train_data_ts), order = c(2, 0, 0))
+Box.test(arima200$resid, lag=1, type = c("Box-Pierce", "Ljung-Box"))
+```
+
+Les résidus des deux modèles semblent en adéquation avec la structure d'un bruit blanc. Les modèles sont donc valides. AIC et BIC choisissent tous deux : ARIMA( 2 ,0, 0 ) .
+
+## Selection automatique avec auto.arima
+
+```{r}
+auto_model <- auto.arima(ts(train_data_ts))
+
+  
+# Ajuster un modèle ARIMA automatiquement pour déterminer les meilleurs 
+# paramètres p, d, q
+auto_model <- auto.arima(train_data_ts,
+                           ic = c("aicc", "aic", "bic"),
+                           max.p = 5, 
+                           max.q = 5, 
+                           max.P = 5, 
+                           max.Q = 1, 
+                           max.d = 1, 
+                           max.D = 1, 
+                           start.p = 0, 
+                           start.q = 0, 
+                           start.P = 0, 
+                           start.Q = 0)
+  
+# Afficher le résumé du modèle ARIMA
+cat("Résumé du modèle ARIMA :\n")
+summary(auto_model)
+```
+
+```{r}
+summary(arima200)
+```
+
+## Prédire les prix ajustés
+
+```{r}
+# Conversion des données de test en série temporelle
+#2021-06-01
+test_data_ts <- ts(test_data$GSPC.Adjusted, start = c(2021, 06), frequency = 1)
+
+
+# Prédictions avec le modèle ARIMA
+predictions_arima <- predict(arima200, n.ahead = length(test_data_ts))$pred
+
+
+# Calcul des erreurs et des métriques
+errors <- test_data$GSPC.Adjusted_log - predictions_arima
+mae <- mean(abs(errors))
+mse <- mean(errors^2)
+rmse <- sqrt(mse)
+
+# Afficher les résultats
+cat("MAE:", mae, "\n")
+cat("MSE:", mse, "\n")
+cat("RMSE:", rmse, "\n")
+
+# Afficher les critères d'information
+cat("AIC:", AIC(arima200), "\n")
+cat("BIC:", BIC(arima200), "\n")
+```
+
+```{r}
+#### -------------------------------------------------------------------------
+#### 3) Repasser à l'échelle des prix
+#### -------------------------------------------------------------------------
+# (a) Récupérer le dernier prix (ou log-prix) connu dans les données de TRAIN.
+dernier_prix_observe <- train_data$GSPC.Adjusted[nrow(train_data)]
+dernier_log_prix     <- log(dernier_prix_observe)
+
+# (b) Cumuler les rendements prédits pour obtenir les log-prix prédits
+log_prix_predits <- dernier_log_prix + cumsum(predictions_arima)
+
+# (c) Exponentier pour revenir à l'échelle de prix
+prix_predits <- exp(log_prix_predits)
+
+#### -------------------------------------------------------------------------
+#### 4) Créer un DataFrame pour comparer Observé vs. Prédit
+#### -------------------------------------------------------------------------
+df_comparaison <- data.frame(
+  Date        = test_data$Date,              # dates du jeu de test
+  Observed    = test_data$GSPC.Adjusted,     # prix réels
+  Predicted   = prix_predits                 # prix prédits
+)
+
+#### -------------------------------------------------------------------------
+#### 5) Calcul des métriques MAE, RMSE, MSE
+#### -------------------------------------------------------------------------
+
+# Calcul des erreurs
+erreurs <- df_comparaison$Observed - df_comparaison$Predicted
+
+# MAE (Mean Absolute Error)
+MAE <- mean(abs(erreurs))
+
+# MSE (Mean Squared Error)
+MSE <- mean(erreurs^2)
+
+# RMSE (Root Mean Squared Error)
+RMSE <- sqrt(MSE)
+
+# Affichage des métriques
+cat("MAE :", MAE, "\n")
+cat("MSE :", MSE, "\n")
+cat("RMSE :", RMSE, "\n")
+
+#### -------------------------------------------------------------------------
+#### 6) Visualisation
+#### -------------------------------------------------------------------------
+
+# Affichage simple avec plot de base
+plot(df_comparaison$Date, df_comparaison$Observed, 
+     type = "l", col = "red", lwd = 2,
+     main = "Comparaison Prix Observés vs. ARMA sur Log-rendements (Reconstruits)",
+     xlab = "Date", ylab = "Prix")
+lines(df_comparaison$Date, df_comparaison$Predicted, 
+      col = "blue", lwd = 2)
+legend("topleft", legend = c("Observé", "Prédit"), 
+       col = c("red","blue"), lwd = 2, bty = "n")
+
+# Optionnel : avec ggplot2
+# library(ggplot2)
+# ggplot(df_comparaison, aes(x = Date)) +
+#   geom_line(aes(y = Observed, color = "Observé"), size=1) +
+#   geom_line(aes(y = Predicted, color = "Prédit"), size=1) +
+#   labs(title = "Comparaison Observé vs Prédit (ARMA sur Log-rendements puis reconstruit)",
+#        x = "Date", y = "Prix") +
+#   scale_color_manual(values = c("Observé" = "red", "Prédit" = "blue")) +
+#   theme_minimal()
+
+```
+
+# ARMA - GARCH
+
+## Validité de feat un garch
+
+Le modèle ARMA- GARCH est pertinent si les résidus de l'ARMA établit précédemment présentent une **hétéroscédasticité conditionnelle** (volatilité non constante). Pour cela, plusieurs tests peuvent être effectués.
+
+On récupère les résidus
+
+```{r}
+
+# Ajuster un modèle ARMA
+arma_fit <- arima(ts(train_data_ts), order = c(2, 0, 0))  # Exemple avec ARMA(2,0)
+
+# Extraire les résidus du modèle ARMA
+resid_arma <- residuals(arma_fit)
+
+# Étape 1 : Analyse visuelle des résidus au carré
+#par(mfrow = c(2, 1))  # Deux graphiques côte à côte
+acf(resid_arma^2, main = "ACF des résidus au carré (ARMA pur)")
+pacf(resid_arma^2, main = "PACF des résidus au carré (ARMA pur)")
+#par(mfrow = c(1, 1))  # Réinitialisation de la disposition des graphiques
+
+# Étape 2 : Test d'Engle (ARCH Test) pour l'hétéroscédasticité conditionnelle
+library(FinTS)
+
+# Effectuer le test d'Engle sur les résidus de l'ARMA
+arch_test <- ArchTest(resid_arma, lags = 12)  # Test avec 12 lags
+print(arch_test)
+
+# Interprétation du test d'Engle
+if (arch_test$p.value < 0.05) {
+  message("Le test d'Engle indique une hétéroscédasticité conditionnelle significative. Un modèle GARCH est recommandé.")
+} else {
+  message("Le test d'Engle ne détecte pas d'hétéroscédasticité conditionnelle significative. Un modèle ARMA simple peut suffire.")
+}
+
+
+```
+
+## Choix des paramètres du garch
+
+choix garch
+
+On passe la série au carré et on regarde l'acf et pacf
+
+```{r}
+# Supposons que train_data_ts est un vecteur de log-returns (ts ou numeric)
+#sq_data <- ts(train_data_ts^2)
+sq_data <- ts(resid_arma^2)
+
+#par(mfrow=c(2,1))
+acf(sq_data, main="ACF des log-returns au carré")
+pacf(sq_data, main="PACF des log-returns au carré")
+#par(mfrow=c(1,1))
+
+
+```
+
+On cherche les ordre optimaux
+
+```{r}
+# Définissez les bornes
+p_max <- 5
+q_max <- 5
+
+best_aic   <- Inf
+best_model <- NULL
+best_p     <- 0
+best_q     <- 0
+
+for (p in 0:p_max) {
+  for (q in 0:q_max) {
+    
+    # On essaye d'estimer un ARIMA(p,0,q) sur sq_data
+    # (ARMA(p,q) dans la terminologie stats, c'est ARIMA(p,0,q))
+    fit <- tryCatch({
+      Arima(sq_data, order = c(p, 0, q), method = "ML")
+    }, error = function(e) NULL)  # En cas d'erreur, on récupère NULL
+    
+    if (!is.null(fit)) {
+      current_aic <- fit$aic
+      if (current_aic < best_aic) {
+        best_aic   <- current_aic
+        best_model <- fit
+        best_p     <- p
+        best_q     <- q
+      }
+    }
+  }
+}
+
+cat("--------------------------------------------------\n")
+cat("Meilleur ARMA pour la série au carré : ARMA(", 
+    best_p, ",", best_q, ")\n", sep="")
+cat("AIC =", best_aic, "\n")
+cat("--------------------------------------------------\n\n")
+
+summary(best_model)
+
+```
+
+Fit du garch et analyse
+
+```{r}
+#best_order_arma<-c(0,0)
+best_order_arma<-c(2,0)
+best_order_garch<- c(5,5)
+# Spécification finale
+final_spec <- ugarchspec(
+  mean.model = list(armaOrder = best_order_arma, include.mean = TRUE),
+  variance.model = list(model = "sGARCH", garchOrder = best_order_garch),
+  distribution.model = "norm"  # ou "std"
+)
+
+final_fit <- ugarchfit(spec = final_spec, data = train_data_ts, solver = "hybrid")
+
+# Résumé du modèle
+show(final_fit)
+```
+
+## Prédictions
+
+```{r}
+### ------------------- GSPC.Adjusted_log: sgarch(2,0) -------------------
+
+# Spécification du modèle GARCH(2,0) avec ARMA(2,0)
+
+spec <- ugarchspec(
+  variance.model = list(
+    model = "sGARCH",
+    garchOrder = c(5, 5)
+  ),
+  mean.model = list(
+    armaOrder = c(2, 0),
+    include.mean = TRUE
+  ),
+  distribution.model = "norm"  # Distribution des résidus ou std
+)
+
+
+# Supprimer les NA de la série
+
+serie <- na.omit(sp500$GSPC.Adjusted_log)
+
+# Étape 3 : Estimer le modèle GARCH(2,0)
+garch_model <- ugarchfit(spec = spec, data = serie, out.sample = nrow(test_data))
+
+# Étape 4 : Afficher les résultats
+print(garch_model)
+
+# Étape 5 : Résidus et diagnostic
+# Résidus standardisés
+residuals <- residuals(garch_model, standardize = TRUE)
+plot(residuals, type = "l", main = "Résidus standardisés", ylab = "Valeur")
+
+# Test de Ljung-Box pour l'autocorrélation des résidus
+Box.test(residuals, lag = 1, type = "Ljung-Box")
+
+# Étape 6 : Prévisions avec le modèle GARCH(2,0)
+
+forecast <- ugarchforecast(garch_model, n.ahead = nrow(test_data), n.roll =0)
+
+# Étape 7 : Tracés et analyses graphiques
+
+# Dates pour l'axe des abscisses
+
+dates <- index(test_data)
+
+# Graphique 1 : Variance conditionnelle prédite 
+
+predicted_variance <- forecast@forecast$sigmaFor^2
+lower_bound_var <- predicted_variance * qchisq(0.025, df = 1, lower.tail = FALSE)
+upper_bound_var <- predicted_variance * qchisq(0.975, df = 1, lower.tail = FALSE)
+print(length(predicted_variance))
+if (length(dates) != length(predicted_variance)) {
+  dates <- dates[1:length(predicted_variance)]
+}
+
+plot(dates, predicted_variance, type = "l", col = "blue", lwd = 2,
+     xlab = "Date", ylab = "Variance conditionnelle", 
+     main = "Variance conditionnelle prédite")
+
+
+# Graphique 2 : Moyenne conditionnelle prédite 
+predicted_mean <- as.vector(forecast@forecast$seriesFor)
+lower_bound_mean <- predicted_mean - 1.96 * sqrt(predicted_variance)
+upper_bound_mean <- predicted_mean + 1.96 * sqrt(predicted_variance)
+
+if (length(dates) != length(predicted_mean)) {
+  dates <- dates[1:length(predicted_mean)]
+}
+plot(dates, predicted_mean, type = "l", col = "blue", lwd = 2,
+     xlab = "Date", ylab = "Moyenne conditionnelle", 
+     main = "Moyenne conditionnelle prédite")
+
+# Graphique 3 : Comparaison des prédictions et des prix réels
+initial_price <- test_data$GSPC.Adjusted
+predicted_price <- numeric(length(predicted_mean))
+predicted_price[1] <- initial_price[1]
+
+# Reconstruction des prix cumulés
+for (i in 2:length(predicted_mean)) {
+  predicted_price[i] <- predicted_price[i - 1] * exp(predicted_mean[i])
+}
+
+real_prices <- test_data$GSPC.Adjusted
+
+if (length(dates) != length(real_prices)) {
+  
+  dates <- dates[1:length(real_prices)]
+}
+
+plot(dates, real_prices, type = "l", col = "black", lwd = 2,
+     xlab = "Date", ylab = "Prix", 
+     main = "Comparaison des prix réels et prédits GARCH",ylim = c(0,max(predicted_price)+10))
+lines(dates, predicted_price, col = "blue", lwd = 2)
+
+plot(dates, predicted_price, type = "l", col = "red", lwd = 2,
+     xlab = "Date", ylab = "Prix", 
+     main = "prediction des prix ajustés",ylim = c(0,max(predicted_price)+10))
+
+
+#Etape 9 affichage de la variance prédite vs Vraie variance durant l'entrainement 
+variance_predite <- garch_model@fit$var
+variance_observe <- (garch_model@fit$residuals)^2
+
+plot(variance_observe, main="variance prédite vs Vraie variance durant l'entrainement", type= "l")
+  lines(variance_predite, col= "blue")
+  
+#ETAPE 10 log rendements avec IC
+  
+# Vérification des longueurs des données
+if (length(dates) != length(predicted_mean)) {
+  dates <- dates[1:length(predicted_mean)]
+}
+
+# Calcul des bornes de l'intervalle de confiance pour les log-rendements
+lower_bound_log_returns <- predicted_mean - 1.96 * sqrt(predicted_variance)
+upper_bound_log_returns <- predicted_mean + 1.96 * sqrt(predicted_variance)
+
+# Tracé des log-rendements réels, prédits et des intervalles de confiance
+plot(dates, serie[(length(serie) - length(predicted_mean) + 1):length(serie)], type = "l", col = "black", lwd = 2,
+     xlab = "Date", ylab = "Log-Rendements", 
+     main = "Log-Rendements réels et prédits avec intervalle de confiance",
+     ylim = c(min(lower_bound_log_returns, serie), max(upper_bound_log_returns, serie)))
+
+# Ajout des prédictions des log-rendements
+lines(dates, predicted_mean, col = "blue", lwd = 2)
+
+# Ajout des intervalles de confiance
+lines(dates, lower_bound_log_returns, col = "red", lwd = 1, lty = 2) # Borne inférieure
+lines(dates, upper_bound_log_returns, col = "red", lwd = 1, lty = 2) # Borne supérieure
+
+# Ajout de la légende
+legend("topleft", legend = c("Log-Rendements réels", "Prédictions", "Intervalle de confiance"),
+       col = c("black", "blue", "red"), lwd = c(2, 2, 1), lty = c(1, 1, 2))
+
+  
+  
+# Étape 10 : Calcul des métriques d'évaluation
+mae <- mean(abs(test_data$GSPC.Adjusted_log - predicted_mean), na.rm = TRUE)
+rmse <- sqrt(mean((test_data$GSPC.Adjusted_log - predicted_mean)^2, na.rm = TRUE))
+MSE <- rmse^2
+
+cat(" Test Mean Absolute Error (MAE):", mae, "\n")
+cat("Test Root Mean Squared Error (RMSE):", rmse, "\n")
+cat("Test Mean Squared Erro(MSE)  =", MSE, "\n")
+
+n_train <- length(serie) - nrow(test_data)
+scaled_aic <- infocriteria(garch_model)[1]  # AIC scaled
+scaled_bic <- infocriteria(garch_model)[2]  # BIC scaled
+
+aic_non_scaled <- scaled_aic * n_train
+bic_non_scaled <- scaled_bic * n_train
+
+cat("Non-scaled AIC:", aic_non_scaled, "\n")
+cat("Non-scaled BIC:", bic_non_scaled, "\n")
+
+
+
+
+
+```
+
+```{r}
+
+library(FinTS)
+garch_residuals <- residuals(garch_model, standardize = TRUE)
+
+# Test d'Engle sur les résidus standardisés
+ArchTest(garch_residuals, lags = 12)
+```
+
+## Prévision de la volatilité rolling forecast contre rendements
+
+***ATTENTION CE CODE LA PREND DU TEMPS A EXECUTER***
+
+***ATTENTION CE CODE LA PREND DU TEMPS A EXECUTER***
+
+***ATTENTION CE CODE LA PREND DU TEMPS A EXECUTER***
+
+***ATTENTION CE CODE LA PREND DU TEMPS A EXECUTER***
+
+***ATTENTION CE CODE LA PREND DU TEMPS A EXECUTER***
+
+On cherche à estimer la **volatilité future** du S&P 500 (ou d’une autre série de rendements) à l’aide d’un modèle GARCH (ou ARCH). Le principe de base d’un modèle GARCH est d’estimer la **variance conditionnelle** d’un actif financier, c’est-à-dire la volatilité attendue à un instant tt en fonction de l’historique des rendements jusqu’à tt.
+
+**Le “rolling forecast”** :\
+Au lieu d’ajuster **une seule fois** le modèle sur toutes les données historiques, puis de faire des prévisions pour la période suivante, on procède à un **ré-entrainement successif** :
+
+-   À chaque itération (chaque “jour”), on utilise toutes les données **jusqu’à la veille** pour ré-estimer le modèle (les paramètres de GARCH).
+
+-   Ensuite, on **prévoit la volatilité** pour le jour qui suit.
+
+-   On avance d’un jour et on recommence.\
+    Cela **simule** un vrai contexte de prévision “au fil de l’eau”, en permettant d’actualiser le modèle à chaque pas.
+
+Le graphique montre que la volatilité prédite par le modèle GARCH (ligne bleue) suit globalement les tendances de la volatilité réalisée (ligne rouge), notamment lors des périodes d'augmentation ou de diminution. Cela indique que le modèle capte bien les phases d'instabilité des marchés. Cependant, on observe que la volatilité prédite est plus lissée et réagit parfois avec un léger décalage ou une sous-estimation lors des pics brusques. Cela est typique des modèles GARCH, qui visent à capturer la moyenne conditionnelle de la volatilité et non les extrêmes. Dans l'ensemble, le modèle fournit une bonne estimation de la dynamique de volatilité, mais pourrait être amélioré pour mieux anticiper les mouvements extrêmes.
+
+```{r}
+########################################
+# 0) Préparation et packages
+########################################
+library(rugarch)
+library(xts)
+
+# Exemple : si sp500$Date n'est pas déjà au format Date
+# sp500$Date <- as.Date(sp500$Date)
+
+# Vérifions qu'on a bien les colonnes nécessaires
+# str(sp500)  # Pour vérifier la structure
+
+########################################
+# 1) Construction des objets utiles
+########################################
+# On extrait les rendements et les dates
+Returns <- sp500$GSPC.Adjusted_log
+Dates   <- sp500$Date
+
+# Transformons éventuellement en objet xts (facultatif pour la boucle, 
+# mais pratique pour tracer à la fin).
+# On enlève les éventuels NA pour éviter les problèmes de fitting
+full_data_xts <- na.omit(xts(Returns, order.by = Dates))
+
+# Nombre total de points
+N <- nrow(full_data_xts)
+
+# Redéfinissons pour plus de lisibilité
+Returns_clean <- as.numeric(full_data_xts)
+Dates_clean   <- index(full_data_xts)
+
+########################################
+# 2) Définition du test_size
+########################################
+test_size <- 365 * 2  # 2 ans, par exemple
+# On vérifie qu'on a assez de données
+if (N <= test_size) {
+  stop("Pas assez de données pour définir un test de cette taille.")
+}
+
+########################################
+# 3) Boucle de prévision glissante
+########################################
+rolling_predictions <- numeric(test_size)
+
+# Modèle ARCH(3) => garchOrder = c(3, 0)
+# On ne modélise pas la moyenne (armaOrder = c(0,0)), 
+# ou on peut inclure une constante (include.mean=TRUE/ FALSE) selon vos besoins.
+
+for (i in 1:test_size) {
+  # Définir la borne de fin d'entraînement
+  # À la i-ème itération, on entraîne le modèle sur 
+  # tout ce qui précède la date (N - test_size + i - 1)
+  train_end <- N - test_size + i - 1
+  
+  # Données d'entraînement : de 1 à train_end
+  train_data <- Returns_clean[1:train_end]
+  
+  # Spécification d'un ARCH(3) (=> sGARCH avec c(3,0))
+  spec <- ugarchspec(
+    variance.model = list(model = "sGARCH", garchOrder = c(2, 2)),
+    mean.model     = list(armaOrder = c(2, 0), include.mean = FALSE),
+    distribution.model = "norm"
+  )
+  
+  # Ajustement du modèle sur la fenêtre d'entraînement
+  fit_model <- ugarchfit(
+    spec = spec,
+    data = train_data,
+    solver = "hybrid",
+    silent = TRUE  # Pour éviter l'affichage massif
+  )
+  
+  # Prévision à 1 pas
+  fore <- ugarchforecast(fit_model, n.ahead = 1)
+  
+  # Extraction de la volatilité prédite (sigma) => écart-type 
+  # Comme horizon=1, on prend sigma(fore)[1]
+  rolling_predictions[i] <- as.numeric(sigma(fore))[1]
+}
+
+########################################
+# 4) Création d'un index et objet xts des prédictions
+########################################
+# Les prédictions correspondent aux dernières 'test_size' dates
+test_index <- (N - test_size + 1):N
+
+# On récupère les dates de la période de test
+test_dates <- Dates_clean[test_index]
+
+# Convertir les prédictions en xts
+rolling_pred_xts <- xts(rolling_predictions, order.by = test_dates)
+
+# Les "vrais" rendements sur la période de test
+test_returns_xts <- full_data_xts[test_index]
+
+########################################
+# 5) Visualisation
+########################################
+# Graphique simple : 
+#   - On affiche la série de rendements (rouge) 
+#   - et la volatilité prédite (bleu)
+#plot(
+  #test_returns_xts, type = "l", col = "red", 
+  #main = "Volatilité S&P 500 avec prévision glissante",
+  #xlab = "Date", ylab = ""
+#)
+#lines(rolling_pred_xts, col = "blue")
+#legend(
+  #"topright",
+  #legend = c("Rendement S&P 500", "Volatilité prédite (ARCH(3))"),
+  #col = c("red", "blue"), lty = 1, bty = "n"
+#)
+
+```
+
+```{r}
+########################################
+# Supposons que vous avez déjà effectué la boucle glissante
+# et obtenu :
+# - rolling_pred_xts  : la volatilité prédite (en xts)
+# - test_returns_xts  : les rendements sur la période de test (en xts)
+########################################
+
+# 1) Premier plot : rendements vs. volatilité prédite
+plot(
+  test_returns_xts, type = "l", col = "red", 
+  main = "Rendements S&P 500 vs Volatilité prédite (Rolling GARCH)",
+  xlab = "Date", ylab = ""
+)
+lines(rolling_pred_xts, col = "blue")
+legend(
+  "topright",
+  legend = c("Rendements S&P 500", "Volatilité prédite"),
+  col    = c("red", "blue"),
+  lty    = 1,
+  bty    = "n"
+)
+
+# 2) Deuxième plot : volatilité réalisée vs. volatilité prédite
+#    On définit la volatilité réalisée comme la valeur absolue des rendements
+real_vol_xts <- abs(test_returns_xts)
+
+plot(
+  real_vol_xts, type = "l", col = "red",
+  main = "Volatilité réalisée vs Volatilité prédite (Rolling GARCH)",
+  xlab = "Date", ylab = "Volatilité"
+)
+lines(rolling_pred_xts, col = "blue")
+legend(
+  "topright",
+  legend = c("Volatilité réalisée (|r_t|)", "Volatilité prédite"),
+  col    = c("red", "blue"),
+  lty    = 1,
+  bty    = "n"
+)
+
+```
+
+Prévisions des rendements glissants
+
+```{r}
+library(rugarch)
+
+###############################
+# (A) Préparation des données
+###############################
+# Création d'un DataFrame nettoyé sans NA
+sp500_clean <- sp500[!is.na(sp500$GSPC.Adjusted_log), ]
+
+# Nombre total de points dans les données nettoyées
+N <- nrow(sp500_clean)
+
+# Nombre de points en test (par exemple, les derniers 100 points)
+n_test <- nrow(test_data)
+
+# Vérification qu'il y a assez de données pour la séparation train/test
+if (N <= n_test) {
+  stop("Pas assez de points dans les données nettoyées pour effectuer une séparation train/test.")
+}
+
+###############################
+# (B) Spécification du modèle
+###############################
+# Modèle GARCH(2,2) avec ARMA(2,0) et distribution Student
+spec_gjr <- ugarchspec(
+  mean.model = list(armaOrder = c(2, 0), include.mean = TRUE),
+  variance.model = list(model = "sGARCH", garchOrder = c(5, 5)),
+  distribution.model = "std"
+)
+
+###############################
+# (C) Boucle Rolling Forecast
+###############################
+rolling_mean_forecast <- numeric(n_test)  # Stockage des prévisions de rendements
+rolling_vol_forecast  <- numeric(n_test)  # Stockage des prévisions de volatilité (sigma)
+
+# Position de départ pour la période de test
+start_test <- N - n_test + 1  # Premier point de la période de test
+end_test   <- N               # Dernier point de la période de test
+
+for (i in 1:n_test) {
+  # Détermine jusqu’où entraîner le modèle pour l'itération actuelle
+  train_end_index <- (start_test + i - 1) - 1
+  
+  # Extraction des données d'entraînement (du début à l'indice train_end_index)
+  train_data <- sp500_clean$GSPC.Adjusted_log[1:train_end_index]
+  
+  # Vérification de la validité des données d'entraînement
+  if (length(train_data) <= 1) {
+    stop("Les données d'entraînement sont insuffisantes pour ajuster le modèle.")
+  }
+  
+  # Ajustement du modèle GARCH sur les données d'entraînement
+  fit <- ugarchfit(
+    spec   = spec_gjr,
+    data   = train_data,
+    solver = "hybrid",
+    silent = TRUE
+  )
+  
+  # Prévision à 1 pas
+  fore <- ugarchforecast(fit, n.ahead = 1)
+  
+  # Stockage des prévisions
+  rolling_mean_forecast[i] <- as.numeric(fitted(fore))[1]  # Prévision du rendement
+  rolling_vol_forecast[i]  <- as.numeric(sigma(fore))[1]   # Prévision de la volatilité
+}
+
+###############################
+# (D) Comparaison aux valeurs observées
+###############################
+# Extraction des rendements réels pour la période de test
+real_values <- sp500_clean$GSPC.Adjusted_log[start_test:end_test]
+
+# Alignement des vecteurs de prévisions et des observations
+common_length <- min(length(rolling_mean_forecast), length(real_values))
+real_values   <- real_values[1:common_length]
+mean_pred     <- rolling_mean_forecast[1:common_length]
+vol_pred      <- rolling_vol_forecast[1:common_length]
+
+###############################
+# (E) Calcul des erreurs
+###############################
+# Calcul des erreurs de prévision (rendements)
+errors <- real_values - mean_pred
+MAE  <- mean(abs(errors))
+MSE  <- mean(errors^2)
+RMSE <- sqrt(MSE)
+cat("MAE  =", MAE, "\n")
+cat("MSE  =", MSE, "\n")
+cat("RMSE =", RMSE, "\n")
+
+###############################
+# (F) Plots
+###############################
+
+## 1) Graphique : rendements réels vs. prévisions
+plot(
+  real_values, type = "l", col = "blue",
+  main = "Rendements réels vs. Prévisions (rolling forecast)",
+  xlab = "Jour de test", ylab = "Rendement"
+)
+lines(mean_pred, col = "red")
+legend(
+  "topleft",
+  legend = c("Rendements réels", "Prévisions"),
+  col    = c("blue", "red"),
+  lty    = 1
+)
+
+## 2) Graphique : volatilité prédite
+plot(
+  vol_pred, type = "l", col = "green",
+  main = "Volatilité prédite (rolling forecast)",
+  xlab = "Jour de test", ylab = "Volatilité"
+)
+
+## 3) Graphique : Intervalle de confiance
+k <- 1.96  # Facteur pour un intervalle de confiance à 95%
+upper_bound <- mean_pred + k * vol_pred
+lower_bound <- mean_pred - k * vol_pred
+
+# Tracé des intervalles
+plot(
+  real_values, type = "l", col = "blue",
+  main = "Prévisions avec IC 95% (rolling forecast)",
+  xlab = "Jour de test", ylab = "Rendement"
+)
+lines(mean_pred, col = "red")
+lines(upper_bound, col = "green", lty = 2)
+lines(lower_bound, col = "green", lty = 2)
+legend(
+  "topleft",
+  legend = c("Rendements réels", "Prévisions", "IC 95%"),
+  col    = c("blue", "red", "green"),
+  lty    = c(1, 1, 2)
+)
+
+
+
+## 4) Graphique : vrais prix vs prix reconstruits
+# Reconstruction des prix à partir des prévisions de rendements
+initial_price <- sp500_clean$GSPC.Adjusted[start_test]  # Premier prix de la période de test
+reconstructed_prices <- numeric(common_length)
+reconstructed_prices[1] <- initial_price
+
+# Calcul des prix cumulés à partir des rendements prévus
+for (i in 2:common_length) {
+  reconstructed_prices[i] <- reconstructed_prices[i - 1] * exp(mean_pred[i])
+}
+
+# Extraction des vrais prix pour la période de test
+real_prices <- sp500_clean$GSPC.Adjusted[start_test:end_test]
+real_prices <- real_prices[1:common_length]  # Alignement avec les longueurs des prévisions
+
+# Tracé des vrais prix et des prix reconstruits
+plot(
+  real_prices, type = "l", col = "blue",
+  main = "Vrais prix vs. Prix reconstruits (rolling forecast)",
+  xlab = "Jour de test", ylab = "Prix"
+)
+lines(reconstructed_prices, col = "red")
+legend(
+  "topleft",
+  legend = c("Vrais prix", "Prix reconstruits"),
+  col    = c("blue", "red"),
+  lty    = 1
+)
+
+```
+
+# LSTM
+
+Le code du LSTM se trouve dans le notebook disponible dans le fichier ZIP. Le format du notebook est plus pratique pour le LSTM; permettant de visualiser les résultats rapidement sans pour autant à avoir à relancer tout le processus d'entrainement qui est long dans le cadre de deep learning.
