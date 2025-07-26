@@ -64,8 +64,8 @@ Notebook Python (contribution personnelle) :
 ## 👤 Auteur
 
 **Sonokoli**  
-Étudiant en Data Science à l’ENSAI
-Spécialisé en machine learning appliqué aux séries temporelles et à la modélisation prédictive.
+Étudiant en 3e année à l’ENSAI – Spécialisation Data Science et génie statistiques
+Projet réalisé sous la supervision de Youssef Esstafa
 
 ---
 
@@ -73,3 +73,5 @@ Spécialisé en machine learning appliqué aux séries temporelles et à la mod�
 
 Pour toute question ou suggestion :  
 📧 [sorobamara7@gmail.com]
+
+
