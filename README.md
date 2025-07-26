@@ -69,4 +69,7 @@ Spécialisé en machine learning appliqué aux séries temporelles et à la mod�
 
 ---
 
-_N'hésitez pas à ouvrir une issue ou une pull request pour améliorer ce projet !_
+## 📬 Contact
+
+Pour toute question ou suggestion :  
+📧 [sorobamara7@gmail.com]
